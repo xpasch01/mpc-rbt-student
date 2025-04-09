@@ -9,6 +9,12 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(mpc_rbt_simulator REQUIRED)
 
 include_directories(PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -17,9 +23,16 @@ include_directories(PUBLIC
 set(dependencies
   rclcpp
   geometry_msgs
+  nav_msgs
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  mpc_rbt_simulator
 )
 add_library(${PROJECT_NAME} SHARED
   src/KeyboardControl.cpp
+  src/Localization.cpp
 )
 ament_target_dependencies(${PROJECT_NAME} ${dependencies})
 
@@ -30,8 +43,15 @@ install(TARGETS ${PROJECT_NAME}
 	)
 	
 add_executable(keyboard_control src/keyboard_control_node.cpp)
+add_executable(localization src/localization_node.cpp)
+
 target_link_libraries(keyboard_control ${PROJECT_NAME})
+target_link_libraries(localization ${PROJECT_NAME})
+
+
 install(TARGETS keyboard_control DESTINATION lib/${PROJECT_NAME})
+install(TARGETS localization DESTINATION lib/${PROJECT_NAME})
+
 
 ament_export_include_directories(include)
 ament_export_dependencies(${dependencies})
