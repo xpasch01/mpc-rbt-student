@@ -4,11 +4,18 @@
 #include <vector>
 #include <algorithm>
 #include <math.h>
+#include <queue>
+#include <math.h>
+#include <cmath>
+#include <memory>
+#include <unordered_map>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/srv/get_map.hpp"
 #include "nav_msgs/srv/get_plan.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 
 // A-star cell structure
 struct Cell {
@@ -25,7 +32,7 @@ public:
 
 private:
     // Parameters
-    // TO DO
+    std::string map_frame_ = "map";
 
     // Callbacks
     void mapCallback(rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture future);
