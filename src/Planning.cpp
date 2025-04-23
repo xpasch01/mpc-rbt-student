@@ -44,8 +44,9 @@ void PlanningNode::mapCallback(rclcpp::Client<nav_msgs::srv::GetMap>::SharedFutu
 void PlanningNode::planPath(const std::shared_ptr<nav_msgs::srv::GetPlan::Request> request, std::shared_ptr<nav_msgs::srv::GetPlan::Response> response) {
     // add code here
 
+    dilateMap();
     aStar(request->start, request->goal);
-    //smoothPath();
+    smoothPath();
     
     response->plan = path_;
 
@@ -55,14 +56,35 @@ void PlanningNode::planPath(const std::shared_ptr<nav_msgs::srv::GetPlan::Reques
 void PlanningNode::dilateMap() {
     // add code here
 
-    // ********
-    // * Help *
-    // ********
-    /*
+    int radius = 10; // dilation radius
     nav_msgs::msg::OccupancyGrid dilatedMap = map_;
-    ... processing ...
+    int width = map_.info.width;
+    int height = map_.info.height;
+
+    auto getIndex = [width](int x, int y) {
+        return y * width + x;
+    };
+
+    std::vector<int8_t> newData = map_.data;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (map_.data[getIndex(x, y)] > 50) {
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            newData[getIndex(nx, ny)] = 100;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    dilatedMap.data = newData;
     map_ = dilatedMap;
-    */
 }
 
 void PlanningNode::aStar(const geometry_msgs::msg::PoseStamped &start, const geometry_msgs::msg::PoseStamped &goal) {
@@ -79,7 +101,7 @@ void PlanningNode::aStar(const geometry_msgs::msg::PoseStamped &start, const geo
     int gy = static_cast<int>((goal.pose.position.y - origin.position.y) / resolution);
     
     Cell cStart(sx, sy);
-    Cell cGoal(gy, gy);
+    Cell cGoal(gx, gy);
 
     std::vector<std::shared_ptr<Cell>> openList;
     std::vector<bool> closedList(map_.info.height * map_.info.width, false);
@@ -129,9 +151,11 @@ void PlanningNode::aStar(const geometry_msgs::msg::PoseStamped &start, const geo
         	int nx = current->x + dx;
         	int ny = current->y + dy;
         	
-        	int nIndex = getIndex(nx, ny);
-        	if(closedList[nIndex])
-        		continue;
+        	if(nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            if(closedList[getIndex(nx, ny)]) continue;
+        	if(isObstacle(nx, ny)) continue;
+            
+
         		
         	float g_new = current->g + std::hypot(dx, dy);
         	float h_new = std::hypot(gx - nx, gy - ny);
@@ -164,17 +188,32 @@ void PlanningNode::aStar(const geometry_msgs::msg::PoseStamped &start, const geo
 
 void PlanningNode::smoothPath() {
     // add code here
-
-    // ********
-    // * Help *
-    // ********
-    /*
+    if (path_.poses.size() < 3) {
+        return; // No need to smooth if the path is too short
+    }
+    
     std::vector<geometry_msgs::msg::PoseStamped> newPath = path_.poses;
-    ... processing ...
+    
+    int window = 3;
+    for (size_t i = 0; i < path_.poses.size(); ++i) {
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        int count = 0;
+
+        for (int j = -window; j <= window; ++j) {
+            int idx = i + j;
+            if (idx >= 0 && idx < path_.poses.size()) {
+                sum_x += path_.poses[idx].pose.position.x;
+                sum_y += path_.poses[idx].pose.position.y;
+                count++;
+            }
+        }
+
+        newPath[i].pose.position.x = sum_x / count;
+        newPath[i].pose.position.y = sum_y / count;
+    }
+
     path_.poses = newPath;
-    */
 }
 
-Cell::Cell(int c, int r) {
-    // add code here
-}
+Cell::Cell(int c, int r) : x(c), y(r), f(0), g(0), h(0), parent(nullptr) {}
