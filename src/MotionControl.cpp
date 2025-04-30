@@ -1,164 +1,193 @@
 #include "mpc_rbt_simulator/RobotConfig.hpp"
 #include "MotionControl.hpp"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 MotionControlNode::MotionControlNode() :
     rclcpp::Node("motion_control_node") {
 
-        // Subscribers for odometry and laser scans
         odometry_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/odom", 10, std::bind(&MotionControlNode::odomCallback, this, std::placeholders::_1));
-        
+        "/odometry", 10, std::bind(&MotionControlNode::odomCallback, this, std::placeholders::_1));
+
         lidar_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-            "/scan", 10, std::bind(&MotionControlNode::lidarCallback, this, std::placeholders::_1));
+        "/tiago_base/Hokuyo_URG_04LX_UG01", 10, std::bind(&MotionControlNode::lidarCallback, this, std::placeholders::_1));
 
-        // Publisher for robot control
-        twist_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>(
-            "/cmd_vel", 10);
+        twist_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
 
-        // Client for path planning
-        plan_client_ = this->create_client<nav_msgs::srv::GetPlan>(
-            "/plan_path");
+        plan_client_ = this->create_client<nav_msgs::srv::GetPlan>("/plan_path");
 
-        // Action server
         nav_server_ = rclcpp_action::create_server<nav2_msgs::action::NavigateToPose>(
-            this,
-            "go_to_goal",
-            std::bind(&MotionControlNode::navHandleGoal, this, std::placeholders::_1, std::placeholders::_2),
-            std::bind(&MotionControlNode::navHandleCancel, this, std::placeholders::_1),
-            std::bind(&MotionControlNode::navHandleAccepted, this, std::placeholders::_1));
+        this,
+        "/go_to_goal",
+        std::bind(&MotionControlNode::navHandleGoal, this, std::placeholders::_1, std::placeholders::_2),
+        std::bind(&MotionControlNode::navHandleCancel, this, std::placeholders::_1),
+        std::bind(&MotionControlNode::navHandleAccepted, this, std::placeholders::_1));
 
         RCLCPP_INFO(get_logger(), "Motion control node started.");
 
-        // Connect to path planning service server
-        while (!plan_client_->wait_for_service(std::chrono::seconds(1))) {
-            RCLCPP_WARN(get_logger(), "Waiting for path planning service...");
+        while (!plan_client_->wait_for_service(std::chrono::seconds(1)))
+        {
+          RCLCPP_WARN(get_logger(), "Waiting for plan_path service...");
         }
+        RCLCPP_INFO(get_logger(), "Path succesfully connected to service server...");
     }
 
 void MotionControlNode::checkCollision() {
-    // add code here
-    float threshold = 0.5; // distance threshold for obstacle detection
+    auto thresh = 0.5;
 
-    for(size_t i = 0; i < laser_scan_.ranges.size(); i++) {
-        if (laser_scan_.ranges[i] < threshold) {
-            geometry_msgs::msg::Twist stop;
-            twist_publisher_->publish(stop);
-            RCLCPP_WARN(get_logger(), "Obstacle detected at angle: %f", laser_scan_.angle_min + i * laser_scan_.angle_increment);
-            return;
-        }
+    if (laser_scan_.ranges.empty()) {
+      RCLCPP_INFO(get_logger(), "NOT ENOUGH RANGES TO CHECK COLLISIONS.");
+      return;
+    }
+
+    //for(auto range : laser_scan_.ranges) {
+  for (size_t i = laser_scan_.ranges.size() / 2 - 10; i <= laser_scan_.ranges.size() / 2 + 10; i++) {
+      if (laser_scan_.ranges[i] < thresh) {
+          geometry_msgs::msg::Twist stop;
+          twist_publisher_->publish(stop);
+          RCLCPP_WARN(get_logger(), "Emergency stop! Obstacle at index %zu", i);
+          break;
+      }
     }
 }
 
 void MotionControlNode::updateTwist() {
-    // add code here
-
+    if (path_.poses.empty())
+      return;
+  
+    const double Ts = 0.01;
+    const double v_max = 0.4;
+    const double angular_limit = 0.8;
+    const double lookahead_distance = 0.1;
+  
+    const double Kp = 1.5;
+    const double Kd = 0.35;
+    const double Ki = 0.15;
+  
+    geometry_msgs::msg::PoseStamped target = path_.poses.front();
+  
+    double dx = target.pose.position.x - current_pose_.pose.position.x;
+    double dy = target.pose.position.y - current_pose_.pose.position.y;
+  
+    double distance = std::hypot(dx, dy);
+    if (distance < lookahead_distance) {
+      path_.poses.erase(path_.poses.begin());
+      return;
+    }
+  
+    tf2::Quaternion q(
+      current_pose_.pose.orientation.x,
+      current_pose_.pose.orientation.y,
+      current_pose_.pose.orientation.z,
+      current_pose_.pose.orientation.w
+    );
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  
+    double target_angle = std::atan2(dy, dx);
+    double angle_error = target_angle - yaw;
+  
+    angle_error = std::atan2(std::sin(angle_error), std::cos(angle_error));
+  
+    angle_error_sum_ += angle_error * Ts;
+    double angle_error_derivative = (angle_error - prev_angle_error_) / Ts;
+  
+    double angular_output = Kp * angle_error +
+                            Ki * angle_error_sum_ +
+                            Kd * angle_error_derivative;
+  
+    prev_angle_error_ = angle_error;
+  
+    angular_output = std::clamp(angular_output, -angular_limit, angular_limit);
+  
     geometry_msgs::msg::Twist twist;
-
-    float dx = goal_pose_.pose.position.x - current_pose_.pose.position.x;
-    float dy = goal_pose_.pose.position.y - current_pose_.pose.position.y;
-
-    float distance = sqrt(dx * dx + dy * dy);
-
-    float v_max = 0.5; // max linear velocity
-    float v = std::min(v_max, distance);
-    
-    float angle_to_goal = atan2(dy, dx);
-    float angle_diff = angle_to_goal - tf2::getYaw(current_pose_.pose.orientation);
-
-    twist.angular.z = 0.5 * angle_diff; // proportional control for angular velocity
-    twist.linear.x = v;
-
+  
+    if (std::abs(angle_error) < M_PI / 4) {
+      twist.linear.x = v_max;
+    } else {
+      twist.linear.x = 0.0;
+    }
+  
+    twist.angular.z = angular_output;
     twist_publisher_->publish(twist);
-    
-}
+  }
+  
+  
+  
 
 rclcpp_action::GoalResponse MotionControlNode::navHandleGoal(const rclcpp_action::GoalUUID & uuid, std::shared_ptr<const nav2_msgs::action::NavigateToPose::Goal> goal) {
-    // add code here
-
-    goal_pose_ = goal->pose;
-
-    RCLCPP_INFO(get_logger(), "Received goal: x=%f, y=%f", goal_pose_.pose.position.x, goal_pose_.pose.position.y);
-
-    auto request = std::make_shared<nav_msgs::srv::GetPlan::Request>();
-    request->start = current_pose_;
-    request->goal = goal_pose_;
-    
-    auto future = plan_client_->async_send_request(request,
-        std::bind(&MotionControlNode::pathCallback, this, std::placeholders::_1));
-    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-    
+  (void)uuid;
+  goal_pose_ = goal->pose;
+  RCLCPP_INFO(get_logger(), "Goal accepted: x=%.2f y=%.2f",
+              goal_pose_.pose.position.x, goal_pose_.pose.position.y);
+  return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
 rclcpp_action::CancelResponse MotionControlNode::navHandleCancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<nav2_msgs::action::NavigateToPose>> goal_handle) {
-    // add code here
-
-    RCLCPP_INFO(get_logger(), "Canceling goal");
-    goal_handle->canceled();
-    return rclcpp_action::CancelResponse::ACCEPT;
-    
+  (void)goal_handle;
+  RCLCPP_INFO(get_logger(), "Goal canceled.");
+  return rclcpp_action::CancelResponse::ACCEPT;
 }
 
 void MotionControlNode::navHandleAccepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<nav2_msgs::action::NavigateToPose>> goal_handle) {
-    // add code here
-
     goal_handle_ = goal_handle;
+    auto request = std::make_shared<nav_msgs::srv::GetPlan::Request>();
+    request->start = current_pose_;
+    request->goal = goal_pose_;
+    request->tolerance = 0.05;
 
-    std::thread([this]{
-        execute();
-    }).detach();
+    auto future = plan_client_->async_send_request(
+        request, std::bind(&MotionControlNode::pathCallback, this, std::placeholders::_1));
 }
 
 void MotionControlNode::execute() {
-    // add code here
+  rclcpp::Rate loop_rate(100);
 
-    rclcpp::Rate loop_rate(1.0); // 1 Hz
-
-    while (rclcpp::ok()) {
-
-        if (goal_handle_->is_canceling()) {
-            RCLCPP_INFO(get_logger(), "Goal canceled");
-            break;
-        }
-
-        updateTwist();
-
-        checkCollision();
-
-        loop_rate.sleep();
+  while (rclcpp::ok()) {
+    if (goal_handle_->is_canceling()) {
+      geometry_msgs::msg::Twist stop;
+      twist_publisher_->publish(stop);
+      goal_handle_->canceled(std::make_shared<nav2_msgs::action::NavigateToPose::Result>());
+      RCLCPP_INFO(get_logger(), "Navigation canceled.");
+      return;
     }
-
-    goal_handle_->succeed();
-    RCLCPP_INFO(get_logger(), "Goal succeeded");
-}
-
-void MotionControlNode::pathCallback(rclcpp::Client<nav_msgs::srv::GetPlan>::SharedFuture future) {
-    // add code here
-    auto response = future.get();
-
-    if (response && response->plan.poses.size() > 0) {
-        RCLCPP_INFO(get_logger(), "Path planned successfully. Starting navigation.");
-        goal_handle_->publish_feedback(
-            std::make_shared<nav2_msgs::action::NavigateToPose::Feedback>());
-        navHandleAccepted(goal_handle_);
-    } else {
-        RCLCPP_ERROR(get_logger(), "Failed to plan path.");
-        goal_handle_->abort();
-    }
-    
-}
-
-void MotionControlNode::odomCallback(const nav_msgs::msg::Odometry & msg) {
-    // add code here
-
-    current_pose_ = msg.pose.pose;
 
     checkCollision();
     updateTwist();
-    
+
+    auto feedback = std::make_shared<nav2_msgs::action::NavigateToPose::Feedback>();
+    feedback->current_pose = current_pose_;
+    goal_handle_->publish_feedback(feedback);
+
+    double dx = goal_pose_.pose.position.x - current_pose_.pose.position.x;
+    double dy = goal_pose_.pose.position.y - current_pose_.pose.position.y;
+    if (std::hypot(dx, dy) < 0.1) {
+      geometry_msgs::msg::Twist stop;
+      twist_publisher_->publish(stop);
+      goal_handle_->succeed(std::make_shared<nav2_msgs::action::NavigateToPose::Result>());
+      RCLCPP_INFO(get_logger(), "Goal reached.");
+      return;
+    }
+    loop_rate.sleep();
+  }
+}
+
+void MotionControlNode::pathCallback(rclcpp::Client<nav_msgs::srv::GetPlan>::SharedFuture future) {
+  auto response = future.get();
+  if (response && !response->plan.poses.empty()) {
+    path_ = response->plan;
+    RCLCPP_INFO(get_logger(), "Path received with %zu poses", path_.poses.size());
+    std::thread(&MotionControlNode::execute, this).detach();
+  }
+  else {
+    RCLCPP_WARN(get_logger(), "Empty path received.");
+    goal_handle_->abort(std::make_shared<nav2_msgs::action::NavigateToPose::Result>());
+  }
+}
+
+void MotionControlNode::odomCallback(const nav_msgs::msg::Odometry & msg) {
+    current_pose_.header = msg.header;
+    current_pose_.pose = msg.pose.pose;
 }
 
 void MotionControlNode::lidarCallback(const sensor_msgs::msg::LaserScan & msg) {
-    // add code here
-    laser_scan_ = msg;
+  laser_scan_ = msg;
 }
